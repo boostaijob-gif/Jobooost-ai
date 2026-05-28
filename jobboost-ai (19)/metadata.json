@@ -1,0 +1,6 @@
+{
+  "name": "JobBoost AI",
+  "description": "Next-gen career strategy engine. Personalized roadmaps, resume refinement, and interview prep powered by high-performance AI.",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

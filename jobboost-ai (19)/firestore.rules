@@ -1,0 +1,111 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isValidId(id) {
+       return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidFeedback(data) {
+      return data.keys().hasAll(['message', 'type', 'createdAt']) &&
+             data.keys().size() >= 3 && data.keys().size() <= 6 &&
+             data.message is string && data.message.size() > 0 && data.message.size() <= 5000 &&
+             data.type in ['suggestion', 'issue', 'other'] &&
+             data.createdAt == request.time;
+    }
+
+    match /feedback/{feedbackId} {
+      allow create: if isSignedIn() && isValidFeedback(incoming());
+      allow read, update, delete: if false;
+    }
+
+    function isValidJobAlert(data) {
+      return data.keys().hasAll(['userId', 'title', 'location', 'createdAt']) &&
+             data.userId == request.auth.uid &&
+             data.title is string && data.title.size() > 0 && data.title.size() <= 200 &&
+             data.location is string && data.location.size() <= 200 &&
+             data.createdAt == request.time;
+    }
+
+    match /jobAlerts/{alertId} {
+      allow create: if isSignedIn() && isValidJobAlert(incoming());
+      allow read, delete: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow update: if false;
+    }
+
+    function isValidNotification(data) {
+      return data.keys().hasAll(['userId', 'type', 'jobData', 'isRead', 'createdAt']) &&
+             data.userId == request.auth.uid &&
+             data.type is string &&
+             data.jobData is map &&
+             data.isRead is bool &&
+             data.createdAt == request.time;
+    }
+
+    match /notifications/{notificationId} {
+      allow create: if isSignedIn() && isValidNotification(incoming());
+      allow read: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow update: if isSignedIn() && resource.data.userId == request.auth.uid &&
+                     incoming().diff(existing()).affectedKeys().hasOnly(['isRead']);
+      allow delete: if isSignedIn() && resource.data.userId == request.auth.uid;
+    }
+
+    function isValidProfile(data) {
+      return data.keys().hasAll(['userId', 'email', 'onboardingCompleted']) &&
+             data.userId == request.auth.uid &&
+             data.email is string && data.email.size() > 0 &&
+             data.onboardingCompleted is bool &&
+             (data.keys().hasAny(['phone']) ? (data.phone is string && data.phone.size() <= 20) : true) &&
+             (data.keys().hasAny(['location']) ? (data.location is string && data.location.size() <= 100) : true);
+    }
+
+    match /profiles/{userId} {
+      allow read: if isSignedIn() && userId == request.auth.uid;
+      allow write: if isSignedIn() && userId == request.auth.uid && isValidProfile(incoming());
+    }
+
+    function isValidSavedJob(data) {
+      return data.keys().hasAll(['userId', 'jobId', 'jobData', 'createdAt']) &&
+             data.userId == request.auth.uid &&
+             data.jobId is string &&
+             data.jobData is map &&
+             data.createdAt == request.time;
+    }
+
+    match /savedJobs/{savedJobId} {
+      allow create: if isSignedIn() && isValidSavedJob(incoming());
+      allow get: if isSignedIn() && (resource == null || resource.data.userId == request.auth.uid);
+      allow list, delete: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow update: if false;
+    }
+
+    function isValidJob(data) {
+      return data.keys().hasAll(['title', 'company', 'description', 'location', 'url', 'createdAt']) &&
+             data.title is string && data.title.size() > 0 && data.title.size() <= 3000 &&
+             data.company is string && data.company.size() > 0 && data.company.size() <= 1000 &&
+             data.description is string && data.description.size() > 0 && data.description.size() <= 100000 &&
+             data.location is string && data.location.size() > 0 && data.location.size() <= 1000 &&
+             data.url is string && data.url.size() > 0 && data.url.size() <= 3000;
+    }
+
+    match /jobs/{jobId} {
+      allow read: if isSignedIn();
+      allow write: if isSignedIn() && isValidJob(incoming());
+    }
+  }
+}

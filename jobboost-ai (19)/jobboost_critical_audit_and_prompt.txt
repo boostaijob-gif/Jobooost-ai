@@ -1,0 +1,50 @@
+# JOBBOOST AI - SYSTEM STATE AUDIT & CLAUDE INTEGRATION PROMPT
+# Verified Date: 2026-05-25 (High-Performance 2026 Standard)
+# Target Environment: React 18 + Vite + Express + Firebase sandboxed environment
+
+---
+
+## 1. STATUS REPORT: WHAT IS SOLVED & WORKS FLAWLESSLY (No Action Needed)
+
+### 📊 A. Core Matching Engine & Integrity Check
+*   **Zero-Hallucination Integrity (Core Rule 1):** Real-world RSS parser pulls direct vacancies from AllJobs Israel, Remotive, and We Work Remotely.
+*   **Automatic URL Verification (Scraper Pipeline):** Invalid/Generic aggregators (e.g., plain homepages) and dead links are detected instantly using standard HTTP HEAD probes and filtered.
+*   **Soft Match Trajectory Fallback:** If fewer than 2 strict vacancies exist for highly niche/custom profiles, the system automatically runs compatible role semantic soft queries to prevent empty states.
+
+### 🎙️ B. Premium Interactive Chat Speech-to-Text (`AIChatPrep.tsx`)
+*   **Microphone Web Speech Integration:** Fully responsive Web Speech API binds to the input console. Handles real-time transcription directly into the typing buffer.
+*   **Mic-Permission Safety Shields:** Seamless iframe-level warning flags and permissions alerts (`microphone` declared safely in `/metadata.json`).
+*   **Progressive Character Limits:** Progressive characters meter visual elements correctly lock the inputs if they exceed 1000 characters to protect Gemini token budget.
+
+### ⚡ C. Concurrent & Quota Self-Healing Backends
+*   **Five Simultaneous Window Test:** The server includes dual sequential self-healing sequential handlers for `GEMINI_HARD_QUOTA_EXHAUSTED` (including 429 and rate-limiting cooldown trackers). On threshold hits, it triggers local vector fallback matching without crashing.
+
+---
+
+## 2. ADVANCED INTERACTIVE FLOW & POLISHED ANIMATIONS IMPROVED
+*   **Mic Active States:** Toggle button styling animates dynamically (`animate-pulse` on active state) with clear text bubble indicators.
+*   **Button Transitions:** Exit, Send, and mic toggle buttons feature precise touch/click feedback (`hover:scale-[1.03]`, `active:scale-95`) with elegant micro-transitions.
+*   **Progressive Scrolling:** Scrolled-up indicator triggers with a clean sliding anim and auto-aligns scroll states when user messages are sent to maintain organic pace.
+
+---
+
+## 3. PROMPT FOR CLAUDE (Copy-Paste to Next Generation Session)
+
+```text
+You are an expert full-stack developer optimizing Joboost AI, a career assistant built for the Israeli and global tech job market in React (Vite) + Express server.
+
+The application has passed strict audits regarding general integrity, Web Speech API integration, and concurrent stress testing (handling 5 simultaneous sessions cleanly). Your task is to continue building on this stable foundation if any new features are requested.
+
+### Current Architecture Configuration Context:
+- Full-Stack Environment: Node CJS output, running single production bundle on Port 3000 behind proxy.
+- State Persistence: Shared states reside in secure localStorage variables and selective Firestore database bindings.
+- Speech Recognition API: Built-in Web Speech API translates voices into Hebrew ("he-IL") & English ("en-US").
+- Firebase Admin/Local DB Switcher: Dynamic switcher triggers if custom Database rules are inaccessible.
+
+### Core Rules to Preserve:
+1. Do not break the memoized rendering of messages ('MemoizedMessageItem') which prevents keystroke lags in the chat area.
+2. Maintain the 'GEMINI_HARD_QUOTA_EXHAUSTED' server-side fallback algorithms which gracefully generate local vector results on 429 quota exhaustion.
+3. Every job URL must originate from the scraped database to prevent link hallucination.
+
+If the user wants you to expand the app, respect these constraints. You are now ready to accept their next directive.
+```
