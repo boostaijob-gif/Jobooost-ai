@@ -1,32 +1,23 @@
 import express from "express";
-import Stripe from "stripe";
 import crypto from "crypto";
 import admin from "firebase-admin";
-import { getFirestoreAdmin, ensureDbInitialized } from "./scraper.ts";
+import { getFirestoreAdmin, ensureDbInitialized } from "./scraper";
 
 const router = express.Router();
-
-// ─────────────────────────────────────────────────────────────────────────────
-// HOISTED UTILITIES
-// ─────────────────────────────────────────────────────────────────────────────
-function now_millis() {
-  return `${Date.now()}_${Math.random().toString(36).substring(2, 5)}`;
-}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ENCRYPTION SERVICE (AES-256-CBC)
 // ─────────────────────────────────────────────────────────────────────────────
 const ENCRYPTION_ALGORITHM = "aes-256-cbc";
 
-const getEncryptionKeyAndIV = () => {
+const getEncryptionKey = () => {
   const secret = process.env.PAYMENTS_ENCRYPTION_KEY || "jobboost_secret_encryption_key_32bytes_pkg_aes";
-  const key = crypto.createHash("sha256").update(secret).digest();
-  return key;
+  return crypto.createHash("sha256").update(secret).digest();
 };
 
 export function encrypt(text: string): string {
   if (!text) return "";
-  const key = getEncryptionKeyAndIV();
+  const key = getEncryptionKey();
   const iv = crypto.randomBytes(16);
   const cipher = crypto.createCipheriv(ENCRYPTION_ALGORITHM, key, iv);
   let encrypted = cipher.update(text, "utf8", "hex");
@@ -37,7 +28,7 @@ export function encrypt(text: string): string {
 export function decrypt(encryptedText: string): string {
   if (!encryptedText) return "";
   try {
-    const key = getEncryptionKeyAndIV();
+    const key = getEncryptionKey();
     const parts = encryptedText.split(":");
     if (parts.length !== 2) return encryptedText;
     const iv = Buffer.from(parts[0], "hex");
@@ -47,23 +38,9 @@ export function decrypt(encryptedText: string): string {
     decrypted += decipher.final("utf8");
     return decrypted;
   } catch (err) {
-    console.warn("[Decryption Warning] Decryption failed, returning ciphertext standardly:", err);
+    console.warn("[Decryption Warning] Decryption failed, returning ciphertext:", err);
     return encryptedText;
   }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// LAZY STRIPE CLIENT INITIALIZATION
-// ─────────────────────────────────────────────────────────────────────────────
-let stripeInstance: Stripe | null = null;
-function getStripe(): Stripe {
-  if (!stripeInstance) {
-    const key = process.env.STRIPE_SECRET_KEY || "sk_test_mock_secret_key_jobboost";
-    stripeInstance = new Stripe(key, {
-      apiVersion: "2023-10-16" as any,
-    });
-  }
-  return stripeInstance;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -76,7 +53,6 @@ const requireAuth = async (req: any, res: any, next: any) => {
     token = authHeader.substring(7);
   }
 
-  // Developer preview environments fallback
   if (!token) {
     if (req.body?.userId) {
       req.userId = req.body.userId;
@@ -117,7 +93,7 @@ const requireAuth = async (req: any, res: any, next: any) => {
 // ─────────────────────────────────────────────────────────────────────────────
 async function activatePremiumSubscription(
   userId: string,
-  provider: "stripe" | "paypal" | "applepay" | "paddle",
+  provider: "paypal" | "applepay" | "paddle",
   subscriptionId: string,
   customerId?: string
 ) {
@@ -136,9 +112,9 @@ async function activatePremiumSubscription(
   const profileData = profileSnap.exists ? profileSnap.data() : {};
 
   const currentPool = Number(profileData?.apiBudgetPool || 0);
-  const nextPool = currentPool + 5.00; // split $5.00 into User budget pool
+  const nextPool = currentPool + 5.00;
+  const platformShare = 10.00;
 
-  // Write new subscription info
   await profileRef.set({
     planType: "premium",
     searchesUsed: 0,
@@ -147,8 +123,6 @@ async function activatePremiumSubscription(
     subscription_status: "active",
     subscription_start: now.toISOString(),
     subscription_end: thirtyDaysLater.toISOString(),
-    stripe_subscription_id: provider === "stripe" ? encSubId : "",
-    stripe_customer_id: provider === "stripe" ? encCustId : "",
     paypal_subscription_id: provider === "paypal" ? encSubId : "",
     applepay_transaction_id: provider === "applepay" ? encSubId : "",
     paddle_subscription_id: provider === "paddle" ? encSubId : "",
@@ -156,7 +130,6 @@ async function activatePremiumSubscription(
     updatedAt: now.toISOString()
   }, { merge: true });
 
-  // Document in Billing Ledger (Ledger 1: payment)
   const ledgerCollection = db.collection("billing_ledger");
   const txnId = `ledger_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
 
@@ -170,22 +143,21 @@ async function activatePremiumSubscription(
     createdAt: now.toISOString()
   });
 
-  // Ledger 2: allocation to target AI Budget
   await ledgerCollection.doc(`${txnId}_allocation`).set({
     userId,
     transactionType: "reconciliation",
     amount: 5.00,
+    platformAmount: platformShare,
     balanceAfter: nextPool,
-    description: `Automated revenue distribution: $5.00 credited to dedicated virtual AI Budget Pool.`,
+    description: `Automated revenue distribution: $5.00 to AI Budget Pool; $10.00 to platform aggregator.`,
     paymentId: subscriptionId,
     createdAt: now.toISOString()
   });
 
-  // Log Payment Event for audit/idempotency
   const paymentEvents = db.collection("payment_events");
   const eventId = `evt_${provider}_${subscriptionId}_${now.getTime()}`;
   await paymentEvents.doc(eventId).set({
-    id: crypto.randomUUID ? crypto.randomUUID() : `uuid_${now.getTime()}_${Math.random().toString(36).substring(2, 5)}`,
+    id: crypto.randomUUID(),
     user_id: userId,
     provider,
     event_id: eventId,
@@ -193,24 +165,26 @@ async function activatePremiumSubscription(
     amount: 15.00,
     currency: "USD",
     subscription_id: subscriptionId,
-    raw_event_type: provider === "stripe" ? "checkout.session.completed" : "BILLING.SUBSCRIPTION.ACTIVATED",
     processed_at: now.toISOString(),
     is_duplicate: false
   });
 
-  // Update central pool aggregator balances
   const summaryRef = db.collection("platform_accounts").doc("summary");
   const summarySnap = await summaryRef.get();
   const summary = summarySnap.exists ? summarySnap.data() : { totalRevenue: 750.00, totalApiSpend: 0.12 };
   await summaryRef.set({
-    totalRevenue: Number(summary.totalRevenue || 0) + 10.00, // Platform retaining its $10.00 split
+    totalRevenue: Number(summary?.totalRevenue ?? 0) + platformShare,
     updatedAt: now.toISOString()
   }, { merge: true });
 
-  console.log(`[Finance Engine] Atomically split subscription. User ${userId} upgraded. Budget: $${nextPool.toFixed(4)}. State synchronized.`);
+  console.log(`[Finance Engine] Subscription activated. User ${userId} upgraded via ${provider}. AI Budget: $${nextPool.toFixed(2)}, Platform +$${platformShare.toFixed(2)}.`);
 }
 
-async function renewSubscription(userId: string, provider: "stripe" | "paypal" | "applepay" | "paddle", subscriptionId: string) {
+async function renewSubscription(
+  userId: string,
+  provider: "paypal" | "applepay" | "paddle",
+  subscriptionId: string
+) {
   const db = getFirestoreAdmin();
   await ensureDbInitialized();
 
@@ -223,7 +197,8 @@ async function renewSubscription(userId: string, provider: "stripe" | "paypal" |
   const profileData = profileSnap.exists ? profileSnap.data() : {};
 
   const currentPool = Number(profileData?.apiBudgetPool || 0);
-  const nextPool = currentPool + 5.00; // Allocating another $5.00 on renewal
+  const nextPool = currentPool + 5.00;
+  const platformShare = 10.00;
 
   await profileRef.set({
     searchesUsed: 0,
@@ -252,31 +227,35 @@ async function renewSubscription(userId: string, provider: "stripe" | "paypal" |
     userId,
     transactionType: "reconciliation",
     amount: 5.00,
+    platformAmount: platformShare,
     balanceAfter: nextPool,
-    description: `Automated renewal allocation: $5.00 credited to AI Budget Pool.`,
+    description: `Automated renewal allocation: $5.00 to AI Budget Pool; $10.00 to platform aggregator.`,
     paymentId: subscriptionId,
     createdAt: now.toISOString()
   });
 
-  // Log aggregate spend update
   const summaryRef = db.collection("platform_accounts").doc("summary");
   const summarySnap = await summaryRef.get();
   const summaryData = summarySnap.exists ? summarySnap.data() : { totalRevenue: 750.00, totalApiSpend: 0.12 };
   await summaryRef.set({
-    totalRevenue: Number(summaryData.totalRevenue || 0) + 10.00, // Platform retaining its remaining $10.00 allocation
+    totalRevenue: Number(summaryData?.totalRevenue ?? 0) + platformShare,
     updatedAt: now.toISOString()
   }, { merge: true });
 
-  console.log(`[Finance Engine] Subscription renewed for user ${userId}. AI Budget Pool: $${nextPool.toFixed(4)}`);
+  console.log(`[Finance Engine] Subscription renewed for user ${userId} via ${provider}. AI Budget: $${nextPool.toFixed(2)}, Platform +$${platformShare.toFixed(2)}.`);
 }
 
-async function markPaymentFailed(userId: string, provider: "stripe" | "paypal" | "applepay" | "paddle", subscriptionId: string) {
+async function markPaymentFailed(
+  userId: string,
+  provider: "paypal" | "applepay" | "paddle",
+  subscriptionId: string
+) {
   const db = getFirestoreAdmin();
   await ensureDbInitialized();
 
   const now = new Date();
   const gracePeriod = new Date();
-  gracePeriod.setDate(now.getDate() + 3); // 3-day grace period
+  gracePeriod.setDate(now.getDate() + 3);
 
   const profileRef = db.collection("profiles").doc(userId);
   await profileRef.set({
@@ -285,38 +264,41 @@ async function markPaymentFailed(userId: string, provider: "stripe" | "paypal" |
     updatedAt: now.toISOString()
   }, { merge: true });
 
-  // Document error
-  const errorsCollection = db.collection("payment_errors");
   const errId = `err_${Date.now()}_${Math.random().toString(36).substring(2, 5)}`;
-  await errorsCollection.doc(errId).set({
+  await db.collection("payment_errors").doc(errId).set({
     id: errId,
     user_id: userId,
     provider,
     error_code: "PAYMENT_FAILED",
-    error_message: `Dynamic cycle billing failed on ${provider} for subscription ${subscriptionId}. User in grace period until ${gracePeriod.toISOString()}.`,
+    error_message: `Billing failed on ${provider} for subscription ${subscriptionId}. Grace period until ${gracePeriod.toISOString()}.`,
     occurred_at: now.toISOString()
   });
 
-  console.warn(`[Finance Engine] Direct debit renewal failed for user ${userId}. Grace period enabled until ${gracePeriod.toISOString()}.`);
+  console.warn(`[Finance Engine] Payment failed for user ${userId}. Grace period until ${gracePeriod.toISOString()}.`);
 }
 
 async function cancelSubscription(userId: string) {
   const db = getFirestoreAdmin();
   await ensureDbInitialized();
 
-  const profileRef = db.collection("profiles").doc(userId);
-  await profileRef.set({
+  await db.collection("profiles").doc(userId).set({
     subscription_status: "canceled",
     updatedAt: new Date().toISOString()
   }, { merge: true });
 
-  console.log(`[Finance Engine] Premium cancellation received. Maintaining access until current paid billing cycle expires.`);
+  console.log(`[Finance Engine] Subscription canceled for user ${userId}. Access maintained until end of billing cycle.`);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// WEBHOOK RATE LIMIT & UTILITY LOGGERS
+// UTILITY LOGGERS
 // ─────────────────────────────────────────────────────────────────────────────
-const logWebhookReceipt = async (provider: string, eventId: string, eventType: string, sourceIp: string, valid: boolean) => {
+const logWebhookReceipt = async (
+  provider: string,
+  eventId: string,
+  eventType: string,
+  sourceIp: string,
+  valid: boolean
+) => {
   try {
     const db = getFirestoreAdmin();
     await ensureDbInitialized();
@@ -355,17 +337,16 @@ const storePaymentError = async (userId: string, provider: string, code: string,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 1. PADDLE PAYMENTS INTEGRATION
+// PADDLE PAYMENTS INTEGRATION
 // ─────────────────────────────────────────────────────────────────────────────
 
 function verifyPaddleWebhook(req: any, webhookSecret: string): boolean {
   const signatureHeader = req.headers["paddle-signature"] as string;
   if (!signatureHeader) return false;
 
-  const parts = signatureHeader.split(";");
   let ts = "";
   let h1 = "";
-  for (const part of parts) {
+  for (const part of signatureHeader.split(";")) {
     const [key, val] = part.split("=");
     if (key === "ts") ts = val;
     if (key === "h1") h1 = val;
@@ -373,10 +354,9 @@ function verifyPaddleWebhook(req: any, webhookSecret: string): boolean {
   if (!ts || !h1) return false;
 
   const rawBody = req.rawBody ? req.rawBody.toString("utf8") : "";
-  const payload = `${ts}.${rawBody}`;
   const computedHash = crypto
     .createHmac("sha256", webhookSecret)
-    .update(payload)
+    .update(`${ts}.${rawBody}`)
     .digest("hex");
 
   return computedHash === h1;
@@ -384,19 +364,20 @@ function verifyPaddleWebhook(req: any, webhookSecret: string): boolean {
 
 // CREATE PADDLE CHECKOUT
 router.post("/paddle/create-checkout", requireAuth, async (req: any, res) => {
-  const { userId, userEmail } = req;
+  const { userId } = req;
   const isHebrew = req.body?.language === "he";
 
   try {
     const db = getFirestoreAdmin();
     await ensureDbInitialized();
 
-    const profileRef = db.collection("profiles").doc(userId);
-    const profileSnap = await profileRef.get();
+    const profileSnap = await db.collection("profiles").doc(userId).get();
     const profile = profileSnap.exists ? profileSnap.data() : null;
 
     if (profile?.planType === "premium" && profile?.subscription_status === "active") {
-      return res.status(409).json({ error: isHebrew ? "כבר קיים מנוי פעיל לחשבון זה." : "Active subscription already exists." });
+      return res.status(409).json({
+        error: isHebrew ? "כבר קיים מנוי פעיל לחשבון זה." : "Active subscription already exists."
+      });
     }
 
     const hostUrl = process.env.NODE_ENV === "production"
@@ -407,18 +388,15 @@ router.post("/paddle/create-checkout", requireAuth, async (req: any, res) => {
     const apiKey = process.env.PADDLE_SECRET_KEY || process.env.PADDLE_API_KEY;
     const priceId = process.env.PADDLE_PRICE_ID;
 
-    // Fallback Mock mode if parameters are missing
     if (!apiKey || !priceId) {
-      console.log(`[Paddle Mock Tool] Creating direct sandbox mock checkout session for user ${userId}.`);
       const mockCheckoutId = `pay_mock_${Math.random().toString(36).substring(2, 10).toUpperCase()}`;
+      console.log(`[Paddle Mock] Sandbox checkout for user ${userId}: ${mockCheckoutId}`);
       return res.json({
         checkoutUrl: `${hostUrl}/?payment_success=true&provider=paddle&userId=${userId}&checkoutId=${mockCheckoutId}`
       });
     }
 
-    // Call live Paddle Billing API v3 to generate transaction
     const baseUrl = isSandbox ? "https://sandbox-api.paddle.com" : "https://api.paddle.com";
-    
     const response = await fetch(`${baseUrl}/transactions`, {
       method: "POST",
       headers: {
@@ -426,15 +404,8 @@ router.post("/paddle/create-checkout", requireAuth, async (req: any, res) => {
         "Content-Type": "application/json"
       },
       body: JSON.stringify({
-        items: [
-          {
-            price_id: priceId,
-            quantity: 1
-          }
-        ],
-        custom_data: {
-          userId
-        }
+        items: [{ price_id: priceId, quantity: 1 }],
+        custom_data: { userId }
       })
     });
 
@@ -444,14 +415,16 @@ router.post("/paddle/create-checkout", requireAuth, async (req: any, res) => {
     }
 
     const transactionData: any = await response.json();
-    const checkoutUrl = transactionData?.data?.checkout?.url || 
+    const checkoutUrl = transactionData?.data?.checkout?.url ||
       `${hostUrl}/?payment_success=true&provider=paddle&userId=${userId}&checkoutId=${transactionData.data.id}`;
 
     res.json({ checkoutUrl });
   } catch (err: any) {
-    console.error("[Paddle Checkout creation error]:", err);
+    console.error("[Paddle Checkout Error]:", err);
     await storePaymentError(userId, "paddle", "CHECKOUT_CREATION_FAILED", err.message || "Paddle checkout creation failed");
-    res.status(500).json({ error: isHebrew ? "שגיאה ביצירת תהליך תשלום של פאדל." : "Could not initialize Paddle transaction." });
+    res.status(500).json({
+      error: isHebrew ? "שגיאה ביצירת תהליך תשלום של פאדל." : "Could not initialize Paddle transaction."
+    });
   }
 });
 
@@ -460,16 +433,14 @@ router.post("/paddle/webhook", async (req: any, res) => {
   const sig = req.headers["paddle-signature"];
   const ip = req.ip || "0.0.0.0";
 
-  if (!sig) {
-    return res.status(400).send("No credentials supplied.");
-  }
+  if (!sig) return res.status(400).send("No credentials supplied.");
 
   const db = getFirestoreAdmin();
   await ensureDbInitialized();
 
   const webhookSecret = process.env.PADDLE_WEBHOOK_SECRET || "";
   let payload: any = {};
-  
+
   try {
     const rawBodyText = req.rawBody ? req.rawBody.toString("utf8") : "";
     payload = JSON.parse(rawBodyText);
@@ -480,10 +451,9 @@ router.post("/paddle/webhook", async (req: any, res) => {
   const eventId = payload.event_id || `evt_paddle_${Date.now()}`;
   const eventType = payload.event_type || "unknown";
 
-  // Signature verification checks
   let signatureValid = false;
   if (!webhookSecret) {
-    console.log("[Paddle Webhook] Mock webhook processed (No PADDLE_WEBHOOK_SECRET supplied).");
+    console.log("[Paddle Webhook] Mock mode — no PADDLE_WEBHOOK_SECRET set.");
     signatureValid = true;
   } else {
     signatureValid = verifyPaddleWebhook(req, webhookSecret);
@@ -498,7 +468,7 @@ router.post("/paddle/webhook", async (req: any, res) => {
   const processedSnap = await processedRef.get();
 
   if (processedSnap.exists) {
-    console.log(`[Finance Engine] Webhook event ${eventId} already resolved. Skipping duplicates.`);
+    console.log(`[Finance Engine] Duplicate webhook ${eventId} — skipping.`);
     return res.status(200).json({ received: true, duplicate: true });
   }
 
@@ -507,34 +477,29 @@ router.post("/paddle/webhook", async (req: any, res) => {
   try {
     const data = payload.data || {};
     const customData = data.custom_data || {};
-    const userId = customData.userId || data.customer_id; // Fallback to customer ID if no custom meta
+    const userId = customData.userId || data.customer_id;
     const subscriptionId = data.subscription_id || data.id;
 
     if (userId && subscriptionId) {
       switch (eventType) {
         case "subscription.activated":
-        case "transaction.completed": {
+        case "transaction.completed":
           await activatePremiumSubscription(userId, "paddle", subscriptionId);
           break;
-        }
-        case "subscription.updated": {
+        case "subscription.updated":
           await renewSubscription(userId, "paddle", subscriptionId);
           break;
-        }
-        case "subscription.canceled": {
+        case "subscription.canceled":
           await cancelSubscription(userId);
           break;
-        }
-        case "subscription.past_due": {
+        case "subscription.past_due":
           await markPaymentFailed(userId, "paddle", subscriptionId);
           break;
-        }
       }
     }
 
-    // Save completed event for future idempotency checks with unconditional crypto.randomUUID()
     await processedRef.set({
-      id: crypto.randomUUID ? crypto.randomUUID() : `uuid_${now_millis()}`,
+      id: crypto.randomUUID(),
       provider: "paddle",
       event_id: eventId,
       event_type: eventType,
@@ -543,30 +508,30 @@ router.post("/paddle/webhook", async (req: any, res) => {
 
     res.json({ received: true });
   } catch (err: any) {
-    console.error("[Paddle Webhook Handling Collapse]:", err);
-    res.status(500).json({ error: "Internal processing error during webhook audit." });
+    console.error("[Paddle Webhook Error]:", err);
+    res.status(500).json({ error: "Internal processing error during webhook handling." });
   }
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 1.5. APPLE PAY INTEGRATION (SECURE CLOUD ENGINE)
+// APPLE PAY INTEGRATION
 // ─────────────────────────────────────────────────────────────────────────────
 
-// CREATE APPLE PAY INTENT / SESSION
 router.post("/applepay/create-payment", requireAuth, async (req: any, res) => {
-  const { userId, userEmail } = req;
+  const { userId } = req;
   const isHebrew = req.body?.language === "he";
 
   try {
     const db = getFirestoreAdmin();
     await ensureDbInitialized();
 
-    const profileRef = db.collection("profiles").doc(userId);
-    const profileSnap = await profileRef.get();
+    const profileSnap = await db.collection("profiles").doc(userId).get();
     const profile = profileSnap.exists ? profileSnap.data() : null;
 
     if (profile?.planType === "premium" && profile?.subscription_status === "active") {
-      return res.status(409).json({ error: isHebrew ? "כבר קיים מנוי פעיל לחשבון זה." : "Active subscription already exists." });
+      return res.status(409).json({
+        error: isHebrew ? "כבר קיים מנוי פעיל לחשבון זה." : "Active subscription already exists."
+      });
     }
 
     const transactionId = `ap_trx_${Date.now()}_${Math.random().toString(36).substring(2, 8).toUpperCase()}`;
@@ -579,48 +544,42 @@ router.post("/applepay/create-payment", requireAuth, async (req: any, res) => {
       merchantName: "JobBoost AI Premium"
     });
   } catch (err: any) {
-    console.error("[Apple Pay API Error]:", err);
-    res.status(500).json({ error: "Failed to configure secure Apple Pay transaction." });
+    console.error("[Apple Pay Error]:", err);
+    res.status(500).json({ error: "Failed to configure Apple Pay transaction." });
   }
 });
 
-// CAPTURE / EXECUTE APPLE PAY SECURE ENROLLMENT
 router.post("/applepay/capture", requireAuth, async (req: any, res) => {
   const { userId } = req;
   const { transactionId } = req.body || {};
 
   if (!transactionId) {
-    return res.status(400).json({ error: "Missing transactionId for Apple Pay authorization" });
+    return res.status(400).json({ error: "Missing transactionId for Apple Pay authorization." });
   }
 
   try {
     const db = getFirestoreAdmin();
     await ensureDbInitialized();
 
-    // Idempotency check: Reject duplicate calls for same transaction
     const processedRef = db.collection("payment_events").doc(`evt_applepay_${transactionId}`);
     const processedSnap = await processedRef.get();
 
     if (processedSnap.exists) {
-      console.log(`[Apple Pay Capture] transaction ${transactionId} already activated.`);
+      console.log(`[Apple Pay] Transaction ${transactionId} already processed.`);
       return res.json({ success: true, duplicated: true });
     }
 
-    console.log(`[Apple Pay Capture Engine] Authorizing high-priority enrolment for User: ${userId}, Trx: ${transactionId}`);
-    
-    // Call the central activation workflow
     await activatePremiumSubscription(userId, "applepay", transactionId);
-
     res.json({ success: true, planType: "premium", transactionId });
   } catch (err: any) {
-    console.error("[Apple Pay Capture Server Error]:", err);
-    await storePaymentError(userId, "applepay", "CAPTURE_FAILED", err.message || "Apple Pay payment capture failure");
-    res.status(500).json({ error: "Could not finalize Apple Pay subscription activation." });
+    console.error("[Apple Pay Capture Error]:", err);
+    await storePaymentError(userId, "applepay", "CAPTURE_FAILED", err.message || "Apple Pay capture failure");
+    res.status(500).json({ error: "Could not finalize Apple Pay subscription." });
   }
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 3. SECURE PAYMENTS STATUS QUERY
+// PAYMENT STATUS QUERY
 // ─────────────────────────────────────────────────────────────────────────────
 router.get("/status", requireAuth, async (req: any, res) => {
   const { userId } = req;
@@ -643,35 +602,33 @@ router.get("/status", requireAuth, async (req: any, res) => {
 
     const p = profileSnap.data()!;
     const plan = p.planType || "free";
-    const quota = plan === "premium" ? 10 : 1;
 
     res.json({
       plan,
       searches_used: p.searchesUsed || 0,
-      quota,
+      quota: plan === "premium" ? 10 : 1,
       subscription_status: p.subscription_status || "inactive",
       provider: p.payment_provider || "none",
       apiBudgetPool: Number(p.apiBudgetPool || 0),
       grace_period_until: p.grace_period_until || ""
     });
   } catch (err: any) {
-    console.error("[Payments Status API failure]:", err);
-    res.status(500).json({ error: "Failed to collect account subscription details." });
+    console.error("[Payments Status Error]:", err);
+    res.status(500).json({ error: "Failed to retrieve subscription details." });
   }
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 4. PERIODIC SUBSCRIPTION SYNCHRONIZATION JOB (Invoked via server/scrapers)
+// PERIODIC SUBSCRIPTION SYNCHRONIZATION JOB (every 6 hours)
 // ─────────────────────────────────────────────────────────────────────────────
 export async function runSubscriptionSynchronizerJob() {
-  console.log("[Finance Scheduler] Initiating periodic 6-hour subscription status review job...");
+  console.log("[Finance Scheduler] Starting 6-hour subscription sync job...");
   try {
     const db = getFirestoreAdmin();
     await ensureDbInitialized();
 
     const profilesSnap = await db.collection("profiles").get();
     const now = new Date();
-
     const processProfiles: Promise<void>[] = [];
 
     profilesSnap.forEach((doc: any) => {
@@ -681,83 +638,50 @@ export async function runSubscriptionSynchronizerJob() {
       if (p.planType === "premium" && p.subscription_status === "active") {
         processProfiles.push((async () => {
           try {
-            // Check for grace periods
+            // Grace period expiry check
             if (p.grace_period_until) {
               const graceLimit = new Date(p.grace_period_until);
               if (now > graceLimit && p.subscription_status === "past_due") {
-                const profileRef = db.collection("profiles").doc(userId);
-                await profileRef.set({
+                await db.collection("profiles").doc(userId).set({
                   planType: "free",
                   subscription_status: "expired",
                   grace_period_until: "",
                   updatedAt: now.toISOString()
                 }, { merge: true });
-
-                console.log(`[Finance Scheduler] Downgraded past_due user ${userId} to free. Grace period of 3 days surpassed.`);
+                console.log(`[Finance Scheduler] User ${userId} downgraded — grace period expired.`);
                 return;
               }
             }
 
-            // Verify if expired past billing cycles dates
+            // Billing cycle expiry check
             if (p.subscription_end) {
               const endTime = new Date(p.subscription_end);
               if (now > endTime) {
-                // Try check provider
-                const provider = p.payment_provider;
-
-                if (provider === "stripe" && p.stripe_subscription_id) {
-                  let subId = "";
-                  try {
-                    subId = decrypt(p.stripe_subscription_id);
-                  } catch (decErr) {
-                    console.error(`[Scheduler Decryption Warning] Decryption failed for user ${userId}:`, decErr);
-                  }
-
-                  if (subId) {
-                    const stripeClient = getStripe();
-                    try {
-                      if (process.env.STRIPE_SECRET_KEY && process.env.STRIPE_SECRET_KEY !== "sk_test_mock_secret_key_jobboost") {
-                        const stripeSub = await stripeClient.subscriptions.retrieve(subId);
-                        if (stripeSub.status !== "active") {
-                          const profileRef = db.collection("profiles").doc(userId);
-                          await profileRef.set({
-                            planType: "free",
-                            subscription_status: "expired",
-                            updatedAt: now.toISOString()
-                          }, { merge: true });
-                          console.log(`[Finance Scheduler] Synced Stripe sub ${subId} state. Downgraded user ${userId} because stripe returned: ${stripeSub.status}`);
-                        }
-                      } else {
-                        // Mock Sync Action
-                        const profileRef = db.collection("profiles").doc(userId);
-                        await profileRef.set({
-                          planType: "free",
-                          subscription_status: "expired",
-                          updatedAt: now.toISOString()
-                        }, { merge: true });
-                      }
-                    } catch (err) {
-                      console.error(`[Scheduler Stripe Error] Checking Stripe Subscription status failed for user ${userId}:`, err);
-                    }
-                  }
-                }
+                // Payment provider is no longer Stripe — mark expired and await re-subscription
+                await db.collection("profiles").doc(userId).set({
+                  planType: "free",
+                  subscription_status: "expired",
+                  updatedAt: now.toISOString()
+                }, { merge: true });
+                console.log(`[Finance Scheduler] User ${userId} subscription expired — downgraded to free.`);
               }
             }
-          } catch (profileErr) {
-            console.error(`[Scheduler Error] Non-blocking individual profile sync collapse for user ${userId}:`, profileErr);
+          } catch (userErr) {
+            // Per-user isolation: one failure never halts the full sync loop
+            console.error(`[Finance Scheduler] Failed to process user ${userId}:`, userErr);
           }
         })());
       }
     });
 
     await Promise.all(processProfiles);
-    console.log("[Finance Scheduler] Synchronization cycle completed successfully.");
+    console.log("[Finance Scheduler] Sync cycle complete.");
   } catch (jobErr) {
-    console.error("[Finance Scheduler] Scheduled synchronizer job failed:", jobErr);
+    console.error("[Finance Scheduler] Sync job failed:", jobErr);
   }
 }
 
-// Dynamically trigger every 6 hours
+// Trigger every 6 hours
 setInterval(() => {
   runSubscriptionSynchronizerJob().catch(console.error);
 }, 1000 * 60 * 60 * 6);
