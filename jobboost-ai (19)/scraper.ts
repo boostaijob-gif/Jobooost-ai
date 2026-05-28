@@ -2,7 +2,7 @@ import admin from "firebase-admin";
 import { GoogleGenAI } from "@google/genai";
 import { jsonrepair } from "jsonrepair";
 import firebaseConfig from "./firebase-applet-config.json" assert { type: "json" };
-import { syncNewJobsWithProfiles } from "./matcher.ts";
+import { syncNewJobsWithProfiles } from "./matcher";
 import fs from "fs";
 import path from "path";
 
@@ -136,7 +136,7 @@ export async function ensureDbInitialized(): Promise<admin.firestore.Firestore> 
       let customDbWorks = false;
       if (firebaseConfig.firestoreDatabaseId) {
         try {
-          const customDb = admin.app().firestore(firebaseConfig.firestoreDatabaseId);
+          const customDb = (admin.app().firestore as any)(firebaseConfig.firestoreDatabaseId);
           await customDb.collection("_db_probe_").limit(1).get();
           activeDb = customDb; customDbWorks = true; useLocalMockDb = false;
           console.log(`[Firebase Init] Custom database "${firebaseConfig.firestoreDatabaseId}" is active.`);
@@ -401,7 +401,7 @@ async function verifyUrl(url: string): Promise<"live" | "dead" | "unverified"> {
     "Accept-Language": "en-US,en;q=0.5"
   };
 
-  const probe = async (method: "HEAD" | "GET"): Promise<"live" | "dead" | "unverified"> => {
+  const probe = async (method: "HEAD" | "GET"): Promise<"live" | "dead" | "unverified" | "retry_get"> => {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 8000);
     try {
@@ -424,11 +424,13 @@ async function verifyUrl(url: string): Promise<"live" | "dead" | "unverified"> {
   };
 
   try {
-    let status = await probe("HEAD") as any;
-    // FIX: Some servers block HEAD; retry with GET
-    if (status === "retry_get") {
-      status = await probe("GET");
+    let result = await probe("HEAD");
+    // retry_get is an internal sentinel — never escapes this function
+    if (result === "retry_get") {
+      result = await probe("GET");
     }
+    // At this point result is "live" | "dead" | "unverified" (retry_get resolved)
+    const status = (result === "retry_get" ? "unverified" : result) as "live" | "dead" | "unverified";
     urlVerificationCache.set(url, { status, timestamp: Date.now() });
     return status;
   } catch {
