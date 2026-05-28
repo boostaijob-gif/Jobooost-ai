@@ -1,5 +1,5 @@
 import admin from "firebase-admin";
-import { getFirestoreAdmin, ScrapedJob } from "./scraper.ts";
+import { getFirestoreAdmin, ScrapedJob } from "./scraper";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SECURITY FIX: ReDoS-safe keyword matching
